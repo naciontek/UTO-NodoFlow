@@ -1,0 +1,143 @@
+name: nodoflow
+x-runtime: &runtime
+  image: nodoflow-runtime:0.1.0
+  build: {context: ., dockerfile: backend/Dockerfile}
+  init: true
+  restart: unless-stopped
+  networks: [nodoflow]
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=5)"]
+    interval: 10s
+    timeout: 6s
+    retries: 5
+    start_period: 15s
+x-node-env: &node-env
+  NF_ROLE: node
+  NF_AMQP_URL: amqp://${RABBITMQ_USER:-nodoflow}:${RABBITMQ_PASSWORD:?Run scripts/start.ps1}@rabbitmq:5672/
+  NF_APPLICATION_URL: http://application:8000
+  NF_WORKERS_PER_NODE: ${WORKERS_PER_NODE:-4}
+  NF_HEARTBEAT_SECONDS: ${HEARTBEAT_SECONDS:-2}
+  NF_LIVENESS_SECONDS: ${LIVENESS_SECONDS:-6}
+  NF_LIVENESS_SCAN_SECONDS: ${LIVENESS_SCAN_SECONDS:-1}
+  NF_IO_TIMEOUT_SECONDS: ${IO_TIMEOUT_SECONDS:-2}
+  NF_MAX_ATTEMPTS: ${MAX_ATTEMPTS:-3}
+x-node-deps: &node-deps
+  application: {condition: service_healthy}
+  rabbitmq: {condition: service_healthy}
+services:
+  postgres:
+    image: postgres:17.6-bookworm
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-nodoflow}
+      POSTGRES_USER: ${POSTGRES_USER:-nodoflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run scripts/start.ps1}
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    networks: [nodoflow]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+  rabbitmq:
+    image: rabbitmq:4.1.3-management-alpine
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-nodoflow}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Run scripts/start.ps1}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+      - ./observability/rabbitmq_plugins:/etc/rabbitmq/enabled_plugins:ro
+    networks: [nodoflow]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
+  application:
+    <<: *runtime
+    environment:
+      NF_ROLE: application
+      NF_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nodoflow}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nodoflow}
+      NF_AMQP_URL: amqp://${RABBITMQ_USER:-nodoflow}:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+      NF_IO_TIMEOUT_SECONDS: ${IO_TIMEOUT_SECONDS:-2}
+      NF_HEARTBEAT_SECONDS: ${HEARTBEAT_SECONDS:-2}
+      NF_LIVENESS_SECONDS: ${LIVENESS_SECONDS:-6}
+      NF_LIVENESS_SCAN_SECONDS: ${LIVENESS_SCAN_SECONDS:-1}
+      NF_MAX_ATTEMPTS: ${MAX_ATTEMPTS:-3}
+    ports: ["127.0.0.1:18000:8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+  node-a:
+    <<: *runtime
+    environment:
+      <<: *node-env
+      NF_NODE_ID: A
+    depends_on: *node-deps
+  node-b:
+    <<: *runtime
+    profiles: [two, three]
+    environment:
+      <<: *node-env
+      NF_NODE_ID: B
+    depends_on: *node-deps
+  node-c:
+    <<: *runtime
+    profiles: [three]
+    environment:
+      <<: *node-env
+      NF_NODE_ID: C
+    depends_on: *node-deps
+  frontend:
+    image: nodoflow-frontend:0.1.0
+    build: {context: ., dockerfile: frontend/Dockerfile}
+    ports: ["127.0.0.1:14200:80"]
+    networks: [nodoflow]
+    depends_on:
+      application: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks: [nodoflow]
+    ports: ["127.0.0.1:19090:9090"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:9090/-/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+  grafana:
+    image: grafana/grafana:12.1.1
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?Run scripts/start.ps1}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/datasource.yml:/etc/grafana/provisioning/datasources/nodoflow.yml:ro
+    networks: [nodoflow]
+    ports: ["127.0.0.1:13000:3000"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+networks:
+  nodoflow:
+volumes:
+  postgres-data:
+  rabbitmq-data:
+  prometheus-data:
+  grafana-data:

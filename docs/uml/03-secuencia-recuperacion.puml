@@ -1,0 +1,68 @@
+@startuml
+title NodoFlow · SD-02\nCaída de nodo, recuperación y resultado tardío
+hide footbox
+autonumber
+skinparam shadowing false
+skinparam defaultFontName Arial
+participant "C-05\nNodo A" as A
+participant "C-03\nCoordinador" as C
+database "C-06\nPostgreSQL" as DB
+participant "Dispatcher\nOutbox" as O
+queue "C-04\nRabbitMQ" as MQ
+participant "C-05\nNodo B / pool" as B
+note over A,DB
+Precondición: T-1=RUNNING; A-1=RUNNING en Nodo A.
+Heartbeat cada 2 s; liveness sin señal válida durante 6 s;
+barrido cada 1 s (baseline aprobada).
+end note
+A -> C : heartbeat / capacidad
+... caída abrupta de Nodo A · cesan heartbeats ...
+C -> C : detectar indisponibilidad\nexcluir A de nuevas asignaciones
+C -> DB : persistir estado no elegible de A\nabandonIfCurrent(T-1, A-1)
+DB --> C : A-1=ABANDONED\nT-1=RETRY_PENDING
+alt quedan intentos funcionales (máximo 3 totales)
+C -> DB : registrar retry durable + Outbox
+DB --> C : commit
+O -> DB : leer Outbox pendiente
+DB --> O : señal de retry
+O ->> MQ : publicar RetryScheduled(T-1)
+MQ -->> O : confirmación
+O -> DB : marcar publicación confirmada
+MQ ->> C : T-1 elegible
+C -> DB : consultar T-1 y nodos elegibles
+DB --> C : B disponible
+C -> C : seleccionar Nodo B
+C -> DB : crear A-2 condicionalmente + Outbox\nT-1=RUNNING · A-2=ASSIGNED
+DB --> C : commit
+O -> DB : leer asignación durable
+DB --> O : T-1 / A-2 / B
+O ->> MQ : trabajo dirigido a B
+MQ -->> O : confirmación
+O -> DB : marcar publicación confirmada
+MQ ->> B : ejecutar(T-1, A-2)
+B ->> MQ : AttemptStarted(A-2)
+MQ ->> C : AttemptStarted(A-2)
+C -> DB : A-2: ASSIGNED → RUNNING
+DB --> C : aceptado
+B -> B : ejecutar en worker del pool
+B ->> MQ : AttemptSucceeded(A-2, resultado_B)
+MQ ->> C : resultado reportado
+C -> DB : finalizeIfCurrent(A-2, resultado_B)
+DB --> C : T-1=SUCCEEDED\nresultado autoritativo=resultado_B
+else presupuesto agotado
+C -> DB : failTaskIfNonTerminal(T-1, motivo)
+DB --> C : T-1=FAILED
+end
+opt llega reporte antiguo de A-1 (mensaje retrasado)
+MQ ->> C : AttemptSucceeded(A-1, resultado_A)
+C -> DB : finalizeIfCurrent(A-1, resultado_A)
+DB --> C : REJECTED · intento obsoleto\nno cambiar estado terminal
+C -> C : registrar LateResultRejected
+end
+note over C,B
+Se conserva task_id; cada retry usa otro attempt_id.
+Sin comunicación A ↔ B ni escritura directa de nodos en C-06.
+C-07 observa detección, retry y rechazo, sin decidirlos.
+Entrega al menos una vez; acknowledgements explícitos.
+end note
+@enduml

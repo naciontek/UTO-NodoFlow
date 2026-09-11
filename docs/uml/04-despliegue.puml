@@ -1,0 +1,83 @@
+@startuml
+!pragma layout smetana
+title NodoFlow · Despliegue\nPrototipo académico local · Docker Compose
+left to right direction
+skinparam shadowing false
+skinparam componentStyle uml2
+skinparam defaultFontName Arial
+skinparam nodeBackgroundColor #EAF2F8
+skinparam noteBackgroundColor #FFF8DE
+node "Dispositivo de usuario / operador" as CLIENT {
+artifact "Navegador\nC-01 · Angular" as UI
+}
+node "Estación académica · host físico compartido" as HOST {
+node "Docker Compose · red privada NodoFlow" {
+node "Contenedor frontend" as FRONT {
+artifact "Aplicación Angular" as SPA
+}
+node "D-02 · Runtime de aplicación" as APP {
+component "C-02 · FastAPI / Uvicorn" as API
+component "C-03 · Coordinador Python" as C
+artifact "Outbox dispatcher" as O
+}
+node "D-03 · RabbitMQ" as RAB {
+queue "C-04 · señales / trabajo por nodo\nreportes de ejecución" as Q
+}
+node "D-04 · PostgreSQL" as PG {
+database "C-06 · Task / Attempt / Node\nResultado / Idempotencia / Outbox" as DB
+}
+node "D-05 · Nodo A" as A {
+artifact "C-05 · Python + aio-pika\nThreadPoolExecutor (4 workers baseline)" as WA
+}
+node "D-06 · Nodo B [opcional]" as B {
+artifact "C-05 · misma imagen\nnode_id=B · pool configurable" as WB
+}
+node "D-07 · Nodo C [opcional]" as N {
+artifact "C-05 · misma imagen\nnode_id=C · pool configurable" as WN
+}
+node "C-07 · Observabilidad" {
+node "Contenedor Prometheus" as PROM
+node "Contenedor Grafana" as GRAF
+}
+}
+artifact "Volumen persistente\nPostgreSQL" as VOL
+}
+UI --> FRONT : HTTP · cargar SPA
+UI --> APP : HTTP/JSON · tareas / operación
+APP --> PG : protocolo PostgreSQL\nSQLAlchemy / psycopg · Repository
+PG -- VOL
+APP <--> RAB : AMQP · Outbox / asignaciones\nconsumo de hechos
+A <--> RAB : AMQP · trabajo / reportes
+B <--> RAB : AMQP · trabajo / reportes
+N <--> RAB : AMQP · trabajo / reportes
+A --> APP : HTTP/JSON · registro\nheartbeat / capacidad / control
+B --> APP : HTTP/JSON · control
+N --> APP : HTTP/JSON · control
+PROM ..> APP : HTTP · scrape
+PROM ..> A : HTTP · scrape
+PROM ..> B : HTTP · scrape
+PROM ..> N : HTTP · scrape
+PROM ..> RAB : HTTP · métricas del broker
+GRAF --> PROM : HTTP · consulta de métricas
+APP --> PROM : HTTP · consulta agregada
+UI --> GRAF : HTTP · paneles del operador
+note bottom of APP
+C-02, C-03 y dispatcher comparten runtime.
+C-03 decide; C-06 conserva el estado autoritativo.
+No se afirma alta disponibilidad del plano de control.
+end note
+note bottom of A
+Escenarios de 1, 2 y 3 nodos independientes.
+Sin enlaces Nodo ↔ Nodo ni acceso directo a C-06.
+Cada nodo reutiliza un pool acotado.
+end note
+note bottom of PROM
+Observación no autoritativa y fuera del camino crítico.
+Logs JSON a stdout, sin agregar otro stack.
+end note
+note bottom of HOST
+RabbitMQ y PostgreSQL: instancias únicas locales.
+Nodos lógicos comparten host físico.
+Nombres de contenedores/endpoints: ilustrativos.
+end note
+@enduml

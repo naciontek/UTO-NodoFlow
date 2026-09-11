@@ -1,0 +1,83 @@
+@startuml
+title NodoFlow · SD-01\nAceptación y ejecución de una tarea
+hide footbox
+autonumber
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam sequenceMessageAlign center
+actor "Usuario" as U
+participant "C-01\nAngular" as UI
+participant "C-02\nAPI" as API
+database "C-06\nPostgreSQL" as DB
+participant "Dispatcher\nOutbox" as O
+queue "C-04\nRabbitMQ" as MQ
+participant "C-03\nCoordinador" as C
+participant "C-05\nNodo A" as N
+participant "Worker\ninterno" as W
+U -> UI : crear tarea
+UI -> API : HTTP/JSON · payload + idempotency_key
+API -> API : validar entrada e idempotencia
+API -> DB : transacción: Task(PENDING) + Outbox
+DB --> API : commit · task_id
+API --> UI : aceptada · task_id · PENDING
+UI --> U : identificador para consulta
+note over API,DB
+La aceptación requiere commit durable.
+La misma clave no crea otra Task.
+end note
+... procesamiento desacoplado ...
+O -> DB : leer Outbox confirmado y pendiente
+DB --> O : señal durable
+O ->> MQ : AMQP · publicar señal
+MQ -->> O : confirmación de publicación
+O -> DB : marcar publicación confirmada
+note over O,MQ
+Si falla antes de marcar, puede republicar.
+Consumidores idempotentes; sin exactly-once.
+end note
+MQ ->> C : trabajo elegible
+C -> DB : leer Task y nodos / capacidad
+DB --> C : estado autoritativo
+C -> C : seleccionar nodo elegible
+C -> DB : crear intento condicionalmente\nTask=RUNNING · Attempt=ASSIGNED\n+ registro durable de publicación
+DB --> C : commit · task_id / attempt_id / node_id
+O -> DB : leer asignación pendiente de publicación
+DB --> O : asignación durable
+O ->> MQ : publicar trabajo dirigido a Nodo A
+MQ -->> O : confirmación
+O -> DB : marcar publicación confirmada
+MQ ->> N : asignación(task_id, attempt_id, node_id)
+N -> N : validar duplicado / capacidad
+N -> W : ejecutar intento
+activate W
+N ->> MQ : AttemptStarted
+MQ ->> C : AttemptStarted
+C -> DB : transición condicional ASSIGNED → RUNNING
+DB --> C : aceptada o duplicado inocuo
+note over N,W
+Pool acotado y reusable.
+Otros workers ejecutan otros intentos
+hasta el límite configurado (baseline: 4).
+end note
+W --> N : resultado
+deactivate W
+N ->> MQ : AttemptSucceeded(attempt_id, result)
+MQ ->> C : hecho de ejecución
+C -> DB : finalizeIfCurrent(attempt_id, result)
+DB --> C : Task=SUCCEEDED + resultado autoritativo
+note over MQ,C
+Ack explícito tras procesar cada mensaje.
+Ack del broker ≠ resultado terminal.
+Hechos tardíos/duplicados no sobrescriben el estado.
+end note
+... consulta posterior ...
+UI -> API : HTTP/JSON · consultar(task_id)
+API -> DB : leer Task y resultado
+DB --> API : SUCCEEDED + resultado
+API --> UI : estado y resultado
+UI --> U : mostrar resultado
+note over API,N
+C-07 observa métricas/logs fuera del camino funcional.
+IDs correlacionan Task → Attempt → Node → Worker.
+end note
+@enduml

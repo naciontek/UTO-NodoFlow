@@ -1,0 +1,41 @@
+@startuml
+!pragma layout smetana
+title NodoFlow · Componentes\nInterfaces y canales de la arquitectura vigente
+top to bottom direction
+skinparam componentStyle uml2
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam nodesep 100
+skinparam ranksep 100
+skinparam componentBackgroundColor #EAF2F8
+skinparam ArrowColor #456079
+actor "Usuario / Operador" as U
+component "C-01 · Cliente\nAngular" as UI
+component "C-02 · API de aplicación\nFastAPI / Uvicorn" as API
+component "C-03 · Coordinador\nMediator · Retry funcional\n+ adaptador Outbox dispatcher" as C
+database "C-06 · PostgreSQL\nTask / Attempt / Node / Resultado\nIdempotencia / Outbox" as DB
+queue "C-04 · RabbitMQ\nProducer–Consumer" as MQ
+component "C-05 · Nodo [1..N]\nPython / aio-pika\nThreadPoolExecutor acotado" as N
+component "C-07 · Observabilidad\nPrometheus / Grafana / logs JSON" as OBS
+U --> UI
+UI --> API : I-01 / I-02 · HTTP/JSON\ncrear / consultar / operar
+API --> C : coordinación interna
+API --> DB : I-03 · Repository\nTask + Outbox atómicos / consultas
+C --> DB : I-03 / I-04 / I-05\nRepository / transición condicional / Outbox
+C <--> MQ : I-06 / I-08 · AMQP\nseñales / asignaciones / hechos
+MQ <--> N : I-06 · AMQP\ntrabajo dirigido / reportes
+N --> C : I-07 · HTTP/JSON\nregistro / heartbeat / capacidad / control
+API --> OBS : I-10 · consulta agregada
+OBS ..> N : I-09 · observar métricas
+legend bottom left
+  Interfaces: etiquetas sobre las dependencias.
+  I-08 termina lógicamente en C-03; RabbitMQ transporta los hechos.
+  C-03: autoridad de decisión, selección de nodo y recuperación.
+  C-06: única autoridad de estado; Repository usa SQLAlchemy / psycopg.
+  C-04: buffer reconciliable; ack no equivale a finalización.
+  C-05: sin comunicación Nodo ↔ Nodo ni escritura directa a C-06.
+  I-09 observa C-02..C-06 mediante instrumentación, sin autoridad funcional.
+  Prometheus hace pull/scrape; logs JSON a stdout. Enlaces resumidos.
+  C-02, C-03 y dispatcher comparten runtime (ver despliegue).
+endlegend
+@enduml
